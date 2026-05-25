@@ -41,6 +41,32 @@ int has_bmp_extension(const char *filename);
 int count_bmp_files(const char *dir, const char *exclude, int print_list);
 
 /**
+ * List the .bmp files inside a directory, returning their full paths
+ * sorted alphabetically.
+ *
+ * The order is deterministic (qsort + strcmp) so that distribute() and
+ * recovery() agree on the mapping from carrier file to shadow index
+ * (carrier 0 → x = 1, carrier 1 → x = 2, etc.). Entries whose name
+ * matches `exclude` (compared with strcmp against d_name) are skipped,
+ * which is used to leave the secret out of the carrier list.
+ *
+ * On success the function allocates an array of `count` C strings via
+ * malloc. Each string is "<dir>/<filename>". The caller owns the
+ * memory and must free every string and then the array itself.
+ *
+ * @param dir         Directory to scan. Must not be NULL.
+ * @param exclude     Base filename to skip during the scan (typically
+ *                    the secret image). Pass "" to exclude nothing.
+ * @param out_paths   Output: receives the malloc'd array of paths.
+ *                    Set to NULL on failure.
+ *
+ * @return Number of paths returned on success (0 if no matches),
+ *         or -1 if the directory could not be opened or allocation
+ *         failed.
+ */
+int list_bmp_files(const char *dir, const char *exclude, char ***out_paths);
+
+/**
  * Check whether a path refers to an openable directory.
  *
  * Implemented by attempting opendir() on the path; this means the

@@ -3,6 +3,8 @@
 #include <string.h>
 #include <stdarg.h>
 
+#include "shamir/shamir.h"
+
 #include "utils/utils.h"
 
 /* ─── Constants ─────────────────────────────────────────────── */
@@ -194,8 +196,13 @@ int main(int argc, char *argv[]) {
         printf("n       : %d\n", n);
     printf("Dir     : %s\n", dir);
     printf("\n");
+    /* ────────────────────────────────────────────────────────── */
 
-    /* ── TODO: call distribute() or recover() here ──────────── */
+    if (mode == 'd') {
+        distribute(secret, k, n, dir);
+    } else if (mode == 'r') {
+        recovery(secret, k, dir);
+    }
 
     printf("Done :)\n");
     return EXIT_SUCCESS;
