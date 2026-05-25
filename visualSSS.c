@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "utils.h"
+#include "utils/utils.h"
 
 /* ─── Constants ─────────────────────────────────────────────── */
 #define K_MIN      2
