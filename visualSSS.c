@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "utils/utils.h"
 
@@ -26,6 +27,15 @@ static void print_usage(const char *prog) {
         prog, prog, K_MIN, K_MAX, N_MIN);
 }
 
+static void exit_failure(char **argv, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    print_usage(argv[0]);
+    exit(EXIT_FAILURE);
+}
+
 /* ═══════════════════════════════════════════════════════════════ */
 int main(int argc, char *argv[]) {
 
@@ -42,112 +52,82 @@ int main(int argc, char *argv[]) {
 
     /* ── Argument parsing ───────────────────────────────────── */
     if (argc < 2) {
-        fprintf(stderr, "Error: no arguments provided.\n\n");
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
+        exit_failure(argv, "Error: no arguments provided.\n\n");
     }
 
     for (int i = 1; i < argc; i++) {
 
         if (strcmp(argv[i], "-d") == 0) {
             if (mode != 0) {
-                fprintf(stderr, "Error: only one of -d or -r may be specified.\n\n");
-                print_usage(argv[0]);
-                return EXIT_FAILURE;
+                exit_failure(argv, "Error: only one of -d or -r may be specified.\n\n");
             }
             mode = 'd';
 
         } else if (strcmp(argv[i], "-r") == 0) {
             if (mode != 0) {
-                fprintf(stderr, "Error: only one of -d or -r may be specified.\n\n");
-                print_usage(argv[0]);
-                return EXIT_FAILURE;
+                exit_failure(argv, "Error: only one of -d or -r may be specified.\n\n");
             }
             mode = 'r';
 
         } else if (strcmp(argv[i], "-secret") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "Error: -secret requires an argument.\n\n");
-                print_usage(argv[0]);
-                return EXIT_FAILURE;
+                exit_failure(argv, "Error: -secret requires an argument.\n\n");
             }
             secret = argv[++i];
             secret_set = 1;
 
         } else if (strcmp(argv[i], "-k") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "Error: -k requires an argument.\n\n");
-                print_usage(argv[0]);
-                return EXIT_FAILURE;
+                exit_failure(argv, "Error: -k requires an argument.\n\n");
             }
             char *end;
             k = (int)strtol(argv[++i], &end, 10);
             if (*end != '\0') {
-                fprintf(stderr, "Error: -k value must be an integer (got '%s').\n\n", argv[i]);
-                print_usage(argv[0]);
-                return EXIT_FAILURE;
+                exit_failure(argv, "Error: -k value must be an integer (got '%s').\n\n", argv[i]);
             }
             k_set = 1;
 
         } else if (strcmp(argv[i], "-n") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "Error: -n requires an argument.\n\n");
-                print_usage(argv[0]);
-                return EXIT_FAILURE;
+                exit_failure(argv, "Error: -n requires an argument.\n\n");
             }
             char *end;
             n = (int)strtol(argv[++i], &end, 10);
             if (*end != '\0') {
-                fprintf(stderr, "Error: -n value must be an integer (got '%s').\n\n", argv[i]);
-                print_usage(argv[0]);
-                return EXIT_FAILURE;
+                exit_failure(argv, "Error: -n value must be an integer (got '%s').\n\n", argv[i]);
             }
             n_set = 1;
 
         } else if (strcmp(argv[i], "-dir") == 0) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "Error: -dir requires an argument.\n\n");
-                print_usage(argv[0]);
-                return EXIT_FAILURE;
+                exit_failure(argv, "Error: -dir requires an argument.\n\n");
             }
             dir = argv[++i];
 
         } else {
-            fprintf(stderr, "Error: unknown parameter '%s'.\n\n", argv[i]);
-            print_usage(argv[0]);
-            return EXIT_FAILURE;
+            exit_failure(argv, "Error: unknown parameter '%s'.\n\n", argv[i]);
         }
     }
 
     /* ── Validate mandatory parameters are present ──────────── */
     if (mode == 0) {
-        fprintf(stderr, "Error: must specify either -d (distribute) or -r (recover).\n\n");
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
+        exit_failure(argv, "Error: must specify either -d (distribute) or -r (recover).\n\n");
     }
     if (!secret_set) {
-        fprintf(stderr, "Error: -secret is required.\n\n");
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
+        exit_failure(argv, "Error: -secret is required.\n\n");
     }
     if (!k_set) {
-        fprintf(stderr, "Error: -k is required.\n\n");
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
+        exit_failure(argv, "Error: -k is required.\n\n");
     }
 
     /* ── -n is only allowed with -d ─────────────────────────── */
     if (n_set && mode == 'r') {
-        fprintf(stderr, "Error: -n can only be used with -d (distribute).\n\n");
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
+        exit_failure(argv, "Error: -n can only be used with -d (distribute).\n\n");
     }
 
     /* ── Validate secret filename ends in .bmp ──────────────── */
     if (!has_bmp_extension(secret)) {
-        fprintf(stderr, "Error: secret image '%s' must have a .bmp extension.\n\n", secret);
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
+        exit_failure(argv, "Error: secret image '%s' must have a .bmp extension.\n\n", secret);
     }
 
     /* ── On distribute, secret file must exist ──────────────── */
@@ -163,9 +143,7 @@ int main(int argc, char *argv[]) {
 
     /* ── Validate k range ───────────────────────────────────── */
     if (k < K_MIN || k > K_MAX) {
-        fprintf(stderr, "Error: k must be between %d and %d (got %d).\n\n", K_MIN, K_MAX, k);
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
+        exit_failure(argv, "Error: k must be between %d and %d (got %d).\n\n", K_MIN, K_MAX, k);
     }
 
     /* ── Validate directory ─────────────────────────────────── */
@@ -188,7 +166,7 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Error: could not scan directory '%s'.\n", dir);
             return EXIT_FAILURE;
         }
-        n = found;
+       n = found;
         printf("Info: Found %d BMP carrier image(s).\n", n);
     }
 
