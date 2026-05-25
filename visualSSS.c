@@ -1,13 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <dirent.h>
+
+#include "utils.h"
 
 /* ─── Constants ─────────────────────────────────────────────── */
 #define K_MIN      2
 #define K_MAX      10
 #define N_MIN      2
-#define BMP_EXT    ".bmp"
 
 /* ─── Usage ──────────────────────────────────────────────────── */
 static void print_usage(const char *prog) {
@@ -24,46 +24,6 @@ static void print_usage(const char *prog) {
         "                  If omitted, n = number of BMP images found in directory.\n"
         "  -dir <dir>      Directory containing carrier images (default: current directory).\n",
         prog, prog, K_MIN, K_MAX, N_MIN);
-}
-
-/* ─── Helper: check .bmp extension (case-insensitive) ────────── */
-static int has_bmp_extension(const char *filename) {
-    size_t len = strlen(filename);
-    if (len < 4) return 0;
-    const char *ext = filename + len - 4;
-    /* Compare ignoring case */
-    char lower[5];
-    for (int i = 0; i < 4; i++)
-        lower[i] = (char)(ext[i] >= 'A' && ext[i] <= 'Z' ? ext[i] + 32 : ext[i]);
-    lower[4] = '\0';
-    return strcmp(lower, BMP_EXT) == 0;
-}
-
-/* ─── Helper: count .bmp files in a directory ────────────────── */
-static int count_bmp_files(const char *dir, const char *exclude, int print_list) {
-    DIR *d = opendir(dir);
-    if (!d) return -1;
- 
-    int count = 0;
-    struct dirent *entry;
-    while ((entry = readdir(d)) != NULL) {
-        if (has_bmp_extension(entry->d_name) &&
-            strcmp(entry->d_name, exclude) != 0) {
-            if (print_list)
-                printf("  [%d] %s\n", count + 1, entry->d_name);
-            count++;
-        }
-    }
-    closedir(d);
-    return count;
-}
-
-/* ─── Helper: check that a directory exists ──────────────────── */
-static int directory_exists(const char *path) {
-    DIR *d = opendir(path);
-    if (!d) return 0;
-    closedir(d);
-    return 1;
 }
 
 /* ═══════════════════════════════════════════════════════════════ */
