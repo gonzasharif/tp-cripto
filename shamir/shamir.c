@@ -2,102 +2,9 @@
 #include <time.h>
 
 #include "shamir.h"
+#include "gf/gf.h"
+#include "lsb/lsb.h"
 #include "../utils/utils.h"
-
-#define MOD 257   /* Prime modulus for polynomial evaluation in GF(257). */
-
-/* ─── Helpers ─────────────────────────────────────────────────── */
-
-/* Evaluate p(x) = c[0] + c[1]*x + c[2]*x^2 + ... + c[k-1]*x^{k-1}  (mod MOD). */
-static int poly_eval(const uint8_t *coefs, int k, int x) {
-    int result = 0;
-    int power  = 1;
-    for (int i = 0; i < k; i++) {
-        result = (result + (int)coefs[i] * power) % MOD;
-        power  = (power * x) % MOD;
-    }
-    return result;
-}
-
-/* Embed the 8 bits of `byte` into the LSBs of 8 consecutive carrier
- * pixels starting at pixels[offset]. Most-significant bit first. */
-static void embed_byte_lsb(uint8_t *pixels, size_t offset, uint8_t byte) {
-    for (int b = 0; b < 8; b++) {
-        uint8_t bit = (byte >> (7 - b)) & 1;
-        pixels[offset + b] = (pixels[offset + b] & 0xFE) | bit;
-    }
-}
-
-/* Inverse of embed_byte_lsb: read 8 LSBs as a single byte, MSB-first. */
-static uint8_t extract_byte_lsb(const uint8_t *pixels, size_t offset) {
-    uint8_t byte = 0;
-    for (int b = 0; b < 8; b++) {
-        byte = (uint8_t)((byte << 1) | (pixels[offset + b] & 1));
-    }
-    return byte;
-}
-
-/* Modular exponentiation: base^exp mod m. */
-static int mod_pow(int base, int exp, int m) {
-    long result = 1;
-    long b = base % m;
-    if (b < 0) b += m;
-    while (exp > 0) {
-        if (exp & 1) result = result * b % m;
-        b = b * b % m;
-        exp >>= 1;
-    }
-    return (int)result;
-}
-
-/* Modular inverse via Fermat's little theorem (valid since MOD is prime). */
-static int mod_inv(int a, int m) {
-    return mod_pow(a, m - 2, m);
-}
-
-/* Solve the k x k linear system in GF(MOD) given in augmented form
- * [A | y] (k rows, k+1 columns). Modifies `mat` in place; on success
- * writes the k-element solution vector into `out`. Returns 0 on success
- * or 1 if the matrix is singular. */
-static int gauss_solve(int mat[10][11], int k, int *out) {
-    for (int col = 0; col < k; col++) {
-        /* Find a non-zero pivot in column `col`. */
-        int pivot = -1;
-        for (int row = col; row < k; row++) {
-            if (mat[row][col] != 0) { pivot = row; break; }
-        }
-        if (pivot < 0) return 1;
-
-        if (pivot != col) {
-            for (int j = 0; j <= k; j++) {
-                int tmp = mat[col][j];
-                mat[col][j]   = mat[pivot][j];
-                mat[pivot][j] = tmp;
-            }
-        }
-
-        /* Scale pivot row so the diagonal entry becomes 1. */
-        int inv = mod_inv(mat[col][col], MOD);
-        for (int j = col; j <= k; j++) {
-            mat[col][j] = (int)((long)mat[col][j] * inv % MOD);
-        }
-
-        /* Eliminate every other row's entry in column `col`. */
-        for (int row = 0; row < k; row++) {
-            if (row == col || mat[row][col] == 0) continue;
-            int factor = mat[row][col];
-            for (int j = col; j <= k; j++) {
-                long v = mat[row][j] - (long)factor * mat[col][j];
-                v %= MOD;
-                if (v < 0) v += MOD;
-                mat[row][j] = (int)v;
-            }
-        }
-    }
-
-    for (int i = 0; i < k; i++) out[i] = mat[i][k];
-    return 0;
-}
 
 /* ═══════════════════════════════════════════════════════════════ */
 
@@ -203,22 +110,16 @@ int distribute(const char *secret_path, int k, int n, const char *dir) {
      * and embed the resulting byte in 8 consecutive LSBs of carrier
      * j-1.
      *
-     * Because MOD = 257 the evaluation can produce 256, which does
+     * Because GF_MOD = 257 the evaluation can produce 256, which does
      * not fit in a byte. Standard Thien-Lin workaround: when any
-     * shadow lands on 256, decrement coefs[0] by 1 and re-evaluate
-     * the whole block. This makes the scheme slightly lossy (one
-     * pixel per affected block is recovered with a value −1 from the
-     * original), but keeps everything inside a single byte. */
+     * shadow lands on 256, try other values for coefs[0] (closest to
+     * the original first) and re-evaluate the whole block. */
     for (size_t block = 0; block < shadow_bytes; block++) {
         uint8_t *coefs = perm + block * (size_t)k;
-        uint8_t  shadow_byte[10];   /* k_max = n_max = 10 from the CLI spec */
+        uint8_t  shadow_byte[GF_K_MAX];
         int      original_a0 = coefs[0];
         int      found = 0;
 
-        /* Try a_0 ∈ {original, original±1, original±2, ...} in order of
-         * increasing distance. Each j has exactly one "bad" a_0 that
-         * makes p(j) == 256, so across all n shadows at most n values
-         * of a_0 fail and at least 256 - n always work. */
         for (int dist = 0; dist <= 255 && !found; dist++) {
             for (int sign = (dist == 0 ? 1 : -1); sign <= 1 && !found; sign += 2) {
                 int candidate = original_a0 + sign * dist;
@@ -227,7 +128,7 @@ int distribute(const char *secret_path, int k, int n, const char *dir) {
 
                 int collision = 0;
                 for (int j = 0; j < n; j++) {
-                    int result = poly_eval(coefs, k, j + 1);
+                    int result = gf_poly_eval(coefs, k, j + 1);
                     if (result == 256) { collision = 1; break; }
                     shadow_byte[j] = (uint8_t)result;
                 }
@@ -242,7 +143,7 @@ int distribute(const char *secret_path, int k, int n, const char *dir) {
         }
 
         for (int j = 0; j < n; j++) {
-            embed_byte_lsb(carriers[j].pixels, block * 8, shadow_byte[j]);
+            lsb_embed_byte(carriers[j].pixels, block * 8, shadow_byte[j]);
         }
     }
 
@@ -343,7 +244,7 @@ int recovery(const char *secret_path, int k, const char *dir) {
     /* ── 4. Read seed (header bytes 6-7) and shadow indices (8-9) ── */
     uint16_t seed = carriers[0].file_header.bfReserved1;
 
-    int x_values[10];
+    int x_values[GF_K_MAX];
     for (int i = 0; i < k; i++) {
         x_values[i] = (int)carriers[i].file_header.bfReserved2;
         if (x_values[i] < 1) {
@@ -375,23 +276,23 @@ int recovery(const char *secret_path, int k, const char *dir) {
     if (!secret_bytes) goto cleanup;
 
     for (size_t block = 0; block < shadow_bytes; block++) {
-        uint8_t y[10];
+        uint8_t y[GF_K_MAX];
         for (int i = 0; i < k; i++) {
-            y[i] = extract_byte_lsb(carriers[i].pixels, block * 8);
+            y[i] = lsb_extract_byte(carriers[i].pixels, block * 8);
         }
 
-        int mat[10][11];
+        int mat[GF_K_MAX][GF_K_MAX + 1];
         for (int i = 0; i < k; i++) {
             int power = 1;
             for (int j = 0; j < k; j++) {
                 mat[i][j] = power;
-                power = (int)((long)power * x_values[i] % MOD);
+                power = (int)((long)power * x_values[i] % GF_MOD);
             }
             mat[i][k] = (int)y[i];
         }
 
-        int coefs[10];
-        if (gauss_solve(mat, k, coefs) != 0) {
+        int coefs[GF_K_MAX];
+        if (gf_gauss_solve(mat, k, coefs) != 0) {
             fprintf(stderr,
                     "Error: singular Vandermonde matrix at block %zu.\n", block);
             goto cleanup;
