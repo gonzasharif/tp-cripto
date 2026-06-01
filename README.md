@@ -122,11 +122,12 @@ El enunciado deja esta decisión a criterio del grupo. Nuestra convención:
 5. Para cada bloque de `k` bytes permutados se construye un polinomio
    `p(x) = a₀ + a₁·x + ... + a_{k-1}·x^{k-1}` y se evalúa en `x = 1..n` mod
    257.
-6. **Workaround GF(257)**: cuando alguna evaluación cae en 256 (no entra en
-   un byte), se prueba reemplazar `a₀` por otros valores en `[0, 255]`
-   buscando el más cercano al original que no produzca colisiones. Como hay
-   a lo sumo `n ≤ 10` valores "malos" de `a₀`, siempre existe uno usable.
-   Esto introduce una distorsión acotada (un byte por bloque afectado).
+6. **Overflow GF(257)** (Step 5 del paper): cuando alguna evaluación cae en
+   256 (no entra en un byte), se decrementa en 1 el primer coeficiente no
+   nulo del bloque y se reevalúan todas las sombras, repitiendo hasta que
+   ninguna caiga en 256. Un bloque todo-cero nunca produce 256, así que
+   siempre hay un coeficiente para decrementar y el proceso termina. Esto
+   introduce una distorsión acotada (un byte por bloque afectado).
 7. Cada byte resultante se embebe en 8 LSBs consecutivos de la portadora
    correspondiente y se estampa la semilla y el índice de sombra en el
    header.

@@ -110,36 +110,29 @@ int distribute(const char *secret_path, int k, int n, const char *dir) {
      * and embed the resulting byte in 8 consecutive LSBs of carrier
      * j-1.
      *
-     * Because GF_MOD = 257 the evaluation can produce 256, which does
-     * not fit in a byte. Standard Thien-Lin workaround: when any
-     * shadow lands on 256, try other values for coefs[0] (closest to
-     * the original first) and re-evaluate the whole block. */
+     * Because GF_MOD = 257 an evaluation can produce 256, which does not
+     * fit in a byte. We follow Wu-Lo Step 5 verbatim: whenever any
+     * shadow lands on 256, decrement the first non-zero coefficient of
+     * the block by one and re-evaluate every shadow. The paper proves an
+     * all-zero block can never yield 256 (it evaluates to 0), so a
+     * non-zero coefficient always exists; each step lowers the
+     * coefficient sum by one, so the loop terminates. */
     for (size_t block = 0; block < shadow_bytes; block++) {
         uint8_t *coefs = perm + block * (size_t)k;
         uint8_t  shadow_byte[GF_K_MAX];
-        int      original_a0 = coefs[0];
-        int      found = 0;
 
-        for (int dist = 0; dist <= 255 && !found; dist++) {
-            for (int sign = (dist == 0 ? 1 : -1); sign <= 1 && !found; sign += 2) {
-                int candidate = original_a0 + sign * dist;
-                if (candidate < 0 || candidate > 255) continue;
-                coefs[0] = (uint8_t)candidate;
-
-                int collision = 0;
-                for (int j = 0; j < n; j++) {
-                    int result = gf_poly_eval(coefs, k, j + 1);
-                    if (result == 256) { collision = 1; break; }
-                    shadow_byte[j] = (uint8_t)result;
-                }
-                if (!collision) found = 1;
+        for (;;) {
+            int collision = 0;
+            for (int j = 0; j < n; j++) {
+                int result = gf_poly_eval(coefs, k, j + 1);
+                if (result == 256) { collision = 1; break; }
+                shadow_byte[j] = (uint8_t)result;
             }
-        }
-        if (!found) {
-            fprintf(stderr,
-                    "Error: no usable a_0 found for block %zu (should be "
-                    "impossible for n <= 10).\n", block);
-            goto cleanup;
+            if (!collision) break;
+
+            int idx = 0;
+            while (idx < k && coefs[idx] == 0) idx++;
+            coefs[idx]--;   /* idx < k guaranteed: all-zero can't hit 256 */
         }
 
         for (int j = 0; j < n; j++) {

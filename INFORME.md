@@ -81,18 +81,21 @@ valores en `[0, 255]` se pueden almacenar en un byte sin pérdida, pero
 si el polinomio produce `256`, no podemos representarlo en 8 bits sin
 perder información.
 
-El workaround estándar — que implementamos — es: cuando para algún `x`
-la evaluación cae en `256`, se modifica el coeficiente `a₀` del bloque
-(probando otros valores en `[0, 255]`) y se reevalúan todos los
-shadows del bloque hasta encontrar un `a₀` que no produzca colisiones.
-Esto garantiza terminación (a lo sumo `n` valores son "malos" para un
-bloque dado, y `n ≤ 10`), pero introduce una **pequeña pérdida**: el
-byte de ese bloque se recupera con un valor distinto al original.
+La solución es la que define el paper en su **Step 5**: cuando para
+algún `x` la evaluación cae en `256`, se busca el **primer coeficiente
+no nulo** del bloque `{a₀, a₁, …, a_{k-1}}` y se lo **decrementa en 1**;
+luego se reevalúan **todas** las sombras del bloque y se repite hasta
+que ninguna caiga en `256`. El paper prueba que un bloque con todos los
+coeficientes en cero nunca produce `256` (evalúa a `0`), así que siempre
+existe un coeficiente no nulo para decrementar; además cada iteración
+baja en 1 la suma de coeficientes, por lo que el proceso termina. Esto
+introduce una **pequeña pérdida**: el coeficiente decrementado es un
+byte del secreto, que se recupera con un valor levemente distinto al
+original.
 
 En nuestras pruebas con `Albertssd.bmp` (300×300) y `k=8` la
-distorsión fue del **0.38 % de los píxeles** (344 de 90 000), con
-desvíos típicos de ±1 a ±3 en escala de grises — imperceptibles a
-simple vista.
+distorsión fue del **0.39 % de los píxeles** (355 de 90 000), con
+desvíos chicos en escala de grises — imperceptibles a simple vista.
 
 Una alternativa para evitar la pérdida sería usar `MOD = 251` (como en
 Thien-Lin), pero entonces hay que pre-procesar la imagen secreta para
@@ -289,11 +292,12 @@ embedding. Eso a su vez permite portadoras más chicas o trabajar con
 
 ### En la implementación
 
-- **Detección del workaround de mod 257**: nuestro primer intento solo
-  decrementaba `a₀` hasta `0` y abortaba con "colisión irreducible".
-  Resolvimos extendiendo la búsqueda a los 256 valores posibles de
-  `a₀`, ordenados por distancia al valor original para minimizar la
-  distorsión.
+- **Manejo del overflow mod 257**: el caso `fⱼ(x) = 256` no es obvio
+  leyendo solo el enunciado; hay que entender por qué `257` puede
+  producir un valor que no entra en un byte. Lo resolvimos siguiendo el
+  **Step 5** del paper (decrementar el primer coeficiente no nulo del
+  bloque y reevaluar, hasta que ninguna sombra caiga en `256`), que es
+  la convención del propio algoritmo y garantiza terminación.
 - **Orden de las portadoras**: `readdir(2)` no garantiza orden, así
   que distribución y recuperación podrían procesar las portadoras en
   órdenes distintos y romper la correspondencia con los índices de
