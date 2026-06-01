@@ -93,14 +93,24 @@ introduce una **pequeña pérdida**: el coeficiente decrementado es un
 byte del secreto, que se recupera con un valor levemente distinto al
 original.
 
-En nuestras pruebas con `Albertssd.bmp` (300×300) la distorsión fue del
-**0.39 % de los píxeles** (355 de 90 000) para `k=8`, con desvíos chicos
-en escala de grises — imperceptibles a simple vista. La distorsión
-**crece al bajar `k`** (más secciones = `m/k` polinomios → más eventos
-de overflow): medimos 0.4 % (`k=10`), 0.8 % (`k=4`), 1.0 % (`k=3`) y
-1.6 % (`k=2`). Sigue siendo imperceptible en todos los casos. Notar que
-esto es independiente del ocultamiento (LSB-1 o LSB-4): el LSB es
-exacto, la pérdida viene solo del overflow mod 257.
+**¿De qué depende la cantidad de distorsión?** De cuántas evaluaciones
+del polinomio pueden caer en 256. Hay `m/k` secciones y por cada una se
+evalúa en `n` puntos (uno por sombra), así que el total de evaluaciones
+es `(m/k)·n` y cada una tiene ≈ `1/257` de probabilidad de dar 256. Por
+lo tanto la distorsión es proporcional a `n/k`, **no** a `k` solo:
+
+- Con **`n = k`** (el mínimo) el total de evaluaciones es `m` y la
+  distorsión queda casi constante para todo el rango. En nuestras
+  pruebas con `Albertssd.bmp` (300×300) midió ~0.37 % de los píxeles
+  (`k=2`: 0.36 %, `k=4`: 0.38 %, `k=8`: 0.37 %, `k=10`: 0.40 %).
+- Con **`n` grande respecto de `k`** la distorsión sube. Con `n = 8`
+  fijo, por ejemplo, `k=2` trepa a ~1.6 % (porque `n/k = 4`), mientras
+  que `k=8` se queda en ~0.39 % (`n/k = 1`).
+
+En todos los casos el deterioro es imperceptible a simple vista (desvíos
+chicos en escala de grises). Notar que esto es **independiente del
+ocultamiento** (LSB-1 o LSB-4): el LSB es exacto, la pérdida viene solo
+del overflow mod 257.
 
 Una alternativa para evitar la pérdida sería usar `MOD = 251` (como en
 Thien-Lin), pero entonces hay que pre-procesar la imagen secreta para

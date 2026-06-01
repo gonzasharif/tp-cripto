@@ -198,10 +198,10 @@ int main(int argc, char *argv[]) {
     printf("\n");
     /* ────────────────────────────────────────────────────────── */
 
-    if (mode == 'd') {
-        distribute(secret, k, n, dir);
-    } else if (mode == 'r') {
-        recovery(secret, k, dir);
+    int rc = (mode == 'd') ? distribute(secret, k, n, dir)
+                           : recovery(secret, k, dir);
+    if (rc != 0) {
+        return EXIT_FAILURE;
     }
 
     printf("Done :)\n");
