@@ -34,4 +34,29 @@ void lsb_embed_byte(uint8_t *pixels, size_t offset, uint8_t byte);
  */
 uint8_t lsb_extract_byte(const uint8_t *pixels, size_t offset);
 
+/**
+ * Embed the 8 bits of `byte` into the 4 least significant bits of 2
+ * consecutive pixels (high nibble first), so one byte costs 2 pixels.
+ * Used for the k != 8 schemes (see README); each pixel can change by up
+ * to ±15 but the carriers can be as small as 2*secret/k pixels.
+ *
+ * @param pixels  Carrier pixel buffer. Needs offset + 2 bytes. Modified
+ *                in place; the top 4 bits of each pixel are preserved.
+ * @param offset  Index of the first pixel to overwrite.
+ * @param byte    Value whose 8 bits will be embedded.
+ */
+void lsb4_embed_byte(uint8_t *pixels, size_t offset, uint8_t byte);
+
+/**
+ * Inverse of lsb4_embed_byte: read the 4 LSBs of 2 consecutive pixels
+ * starting at `pixels[offset]` (high nibble first) and reassemble the
+ * original byte.
+ *
+ * @param pixels  Carrier pixel buffer (read-only). Needs offset + 2 bytes.
+ * @param offset  Index of the first pixel to read.
+ *
+ * @return The byte rebuilt from the two nibbles.
+ */
+uint8_t lsb4_extract_byte(const uint8_t *pixels, size_t offset);
+
 #endif /* LSB_H */

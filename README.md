@@ -83,29 +83,32 @@ shamir/
 
 El enunciado deja esta decisión a criterio del grupo. Nuestra convención:
 
-- **Tamaño de portadoras**: se exige `carrier_pixels ≥ 8 · secret_pixels / k`.
-  Para `k < 8` esto implica portadoras más grandes que el secreto; para `k > 8`
-  alcanza con portadoras más chicas.
-- **Justificación**: mantenemos el mismo esquema de ocultamiento (1 LSB por
-  píxel, MSB-first), lo que simplifica el código y conserva la
-  correspondencia 1-byte-por-bloque-por-portadora del paper. Cada sombra
-  ocupa `8 · secret_size / k` bits = `secret_size / k` bytes embebidos en
-  los LSBs de las primeras `8 · secret_size / k` portadoras de la
-  portadora.
-- **Propuesta descartada**: usar múltiples LSBs por píxel (por ejemplo, 4
-  LSBs para `k=2`, 2 LSBs para `k=4`) para mantener portadoras del mismo
-  tamaño que el secreto. La descartamos porque el deterioro visual de la
-  portadora crece y el código de embedding/extracción se complica para cada
-  `k` distinto, mientras que usar un LSB uniforme deja todo simétrico y
-  homogéneo.
+- **Tamaño de portadoras**: igual que en `k = 8`, las portadoras **deben tener
+  las mismas dimensiones** (ancho y alto) que el secreto. Si no se cumple, el
+  programa aborta sin modificar nada.
+- **Ocultamiento: LSB replacement, 4 bits por píxel** (nibble alto en el primer
+  píxel, nibble bajo en el segundo), recorriendo los píxeles en orden de
+  archivo a partir de `bfOffBits`. Así cada byte de sombra ocupa 2 píxeles en
+  vez de 8.
+- **Por qué entra**: la sombra tiene `secret_size / k` bytes y con 4 LSBs ocupa
+  `2 · secret_size / k` píxeles. Como la portadora tiene `secret_size` píxeles
+  y `2/k ≤ 1` para todo `k ≥ 2`, la sombra siempre cabe (para `k = 2` usa la
+  portadora completa; para `k` mayor sobra espacio sin tocar).
+- **Por qué LSB-4 y no LSB-1**: con 1 bit por píxel una sombra `k < 8`
+  necesitaría una portadora más grande que el secreto. Subiendo a 4 bits por
+  píxel mantenemos **portadoras del mismo tamaño que el secreto** para todo el
+  rango `k ∈ [2, 10]`, en paralelo con el caso `k = 8`. El precio es un mayor
+  deterioro visual de la portadora (un píxel puede variar hasta ±15, contra ±1
+  en LSB-1).
+- La semilla y el número de sombra se guardan en el header igual que en
+  `k = 8` (`bfReserved1` / `bfReserved2`). Como portadora y secreto miden lo
+  mismo, la recuperación deduce las dimensiones del secreto directamente de la
+  portadora, sin metadata adicional.
 
-### Limitaciones actuales
-
-- **`recovery()` sólo soporta k = 8** (el caso explícitamente fijado por la
-  consigna). Para `k ≠ 8` el programa retorna un error claro. Implementarlo
-  requiere además fijar la convención inversa: cómo deducir las dimensiones
-  `(width, height)` del secreto a partir de las de la portadora, ya que sólo
-  conocemos la cantidad total de píxeles.
+> La regla general que unifica ambos casos es **bits-por-píxel = 8/k**: da
+> `1 LSB` para `k = 8` (lo que pide el enunciado) y `4 LSB` para `k = 2`, y en
+> todos los casos deja portadoras del tamaño del secreto. El enunciado fijó
+> `4 LSB` para todo `k ≠ 8`.
 
 ## Detalles algorítmicos
 
@@ -128,18 +131,19 @@ El enunciado deja esta decisión a criterio del grupo. Nuestra convención:
    ninguna caiga en 256. Un bloque todo-cero nunca produce 256, así que
    siempre hay un coeficiente para decrementar y el proceso termina. Esto
    introduce una distorsión acotada (un byte por bloque afectado).
-7. Cada byte resultante se embebe en 8 LSBs consecutivos de la portadora
-   correspondiente y se estampa la semilla y el índice de sombra en el
-   header.
+7. Cada byte resultante se embebe en la portadora correspondiente —en
+   **8 píxeles (LSB-1) si `k = 8`** o en **2 píxeles (LSB-4) si `k ≠ 8`**— y se
+   estampa la semilla y el índice de sombra en el header.
 
 ### Recuperación
 
 1. Se listan y leen las primeras `k` portadoras del directorio.
-2. Se valida que tengan iguales dimensiones (requisito del spec para `k=8`).
+2. Se valida que tengan iguales dimensiones entre sí (el secreto hereda esas
+   dimensiones, para todo `k`).
 3. Se extrae la semilla (`bfReserved1`) y los índices de sombra
    (`bfReserved2`) de los headers.
-4. Para cada bloque de 8 píxeles de cada portadora se reconstruye el byte de
-   sombra leyendo los LSBs (MSB-first).
+4. Para cada bloque de cada portadora se reconstruye el byte de sombra leyendo
+   los LSBs (8 píxeles con LSB-1 si `k = 8`, 2 píxeles con LSB-4 si `k ≠ 8`).
 5. Con los `k` pares `(x_i, p(x_i))` se arma el sistema de Vandermonde
    `V · c = y` en GF(257) y se resuelve por **eliminación de Gauss-Jordan**.
    Los coeficientes `c` son exactamente los `k` bytes permutados del bloque.

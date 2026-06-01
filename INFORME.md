@@ -93,9 +93,14 @@ introduce una **pequeña pérdida**: el coeficiente decrementado es un
 byte del secreto, que se recupera con un valor levemente distinto al
 original.
 
-En nuestras pruebas con `Albertssd.bmp` (300×300) y `k=8` la
-distorsión fue del **0.39 % de los píxeles** (355 de 90 000), con
-desvíos chicos en escala de grises — imperceptibles a simple vista.
+En nuestras pruebas con `Albertssd.bmp` (300×300) la distorsión fue del
+**0.39 % de los píxeles** (355 de 90 000) para `k=8`, con desvíos chicos
+en escala de grises — imperceptibles a simple vista. La distorsión
+**crece al bajar `k`** (más secciones = `m/k` polinomios → más eventos
+de overflow): medimos 0.4 % (`k=10`), 0.8 % (`k=4`), 1.0 % (`k=3`) y
+1.6 % (`k=2`). Sigue siendo imperceptible en todos los casos. Notar que
+esto es independiente del ocultamiento (LSB-1 o LSB-4): el LSB es
+exacto, la pérdida viene solo del overflow mod 257.
 
 Una alternativa para evitar la pérdida sería usar `MOD = 251` (como en
 Thien-Lin), pero entonces hay que pre-procesar la imagen secreta para
@@ -150,64 +155,55 @@ valores la decisión queda a criterio del grupo.
 
 ### Elección final
 
-Aplicamos el **mismo esquema de embedding** (1 LSB por píxel,
-MSB-first) que para `k = 8`, y exigimos:
+Mantenemos las **portadoras del mismo tamaño que el secreto** para todo
+`k` (igual que en `k = 8`) y solo cambiamos la **profundidad de
+embedding**: usamos **4 LSBs por píxel** (en vez de 1) cuando `k ≠ 8`.
+El nibble alto del byte de sombra va en el primer píxel y el bajo en el
+segundo, así cada byte ocupa 2 píxeles en lugar de 8.
 
-```
-carrier_pixels  ≥  8 · secret_pixels / k
-```
+La sombra tiene `secret_size / k` bytes; con 4 LSBs ocupa
+`2 · secret_size / k` píxeles. Como la portadora tiene `secret_size`
+píxeles y `2/k ≤ 1` para todo `k ≥ 2`, **la sombra siempre entra**:
 
-Es decir, las portadoras deben tener al menos `8/k` veces el tamaño
-del secreto:
-
-| `k` | Tamaño mínimo de portadora |
-|---|---|
-| 2 | 4 × secreto |
-| 4 | 2 × secreto |
-| 8 | igual al secreto *(impuesto por el spec)* |
-| 10 | 0.8 × secreto |
+| `k` | Bits/píxel | Píxeles de portadora usados |
+|---|---|---|
+| 2 | 4 | `secret_size` (portadora completa) |
+| 4 | 4 | `secret_size / 2` |
+| 8 | 1 | `secret_size` *(caso del spec)* |
+| 10 | 4 | `secret_size / 5` |
 
 ### Justificación
 
-- **Uniformidad de código**: la rutina de embedding/extracción es la
-  misma para todos los `k`, no depende del valor del threshold.
-- **Mínimo deterioro visual**: usar siempre 1 LSB por píxel garantiza
-  que cada portadora pierda como mucho `±1` en el valor de cada píxel
-  modificado, lo que se mantiene imperceptible.
-- **Las propiedades criptográficas del esquema no dependen del tamaño
-  relativo** — solo dependen de `k` y `n`, así que sobredimensionar
-  las portadoras no compromete seguridad, solo capacidad.
+- **Portadoras del tamaño del secreto en todo el rango**: la regla
+  general es **bits-por-píxel = 8/k**, que da `1 LSB` para `k = 8` (lo
+  que fija el spec) y `4 LSB` para `k = 2`; en ambos extremos la
+  portadora mide lo mismo que el secreto. La cátedra fijó `4 LSB` para
+  todo `k ≠ 8`, lo que cubre cómodamente el rango (la sombra siempre
+  cabe porque `2/k ≤ 1`).
+- **Sin metadata extra**: como portadora y secreto miden lo mismo, la
+  recuperación deduce las dimensiones del secreto directamente de la
+  portadora; no hace falta guardar nada adicional.
+- **Las propiedades criptográficas no cambian**: dependen solo de `k` y
+  `n`, no de cuántos LSBs se usen para ocultar.
+
+### Costo de usar 4 LSBs
+
+El precio es un **mayor deterioro visual de la portadora**: modificar 4
+bits puede cambiar un píxel hasta en `±15` (contra `±1` con 1 LSB),
+visible en zonas planas. Es el trade-off por mantener las portadoras
+chicas. Para la **imagen recuperada** no hay diferencia: el embedding
+LSB es exacto, así que la única pérdida sigue siendo la del overflow
+mod 257 (sección 2).
 
 ### Propuesta descartada
 
-Considermos usar **múltiples bits por píxel** (4 LSBs para `k=2`, 2
-LSBs para `k=4`, 1 LSB para `k ≥ 8`) para que las portadoras siempre
-tuvieran el mismo tamaño que el secreto, replicando el caso `k = 8`.
-
-La descartamos porque:
-
-1. El deterioro visual de las portadoras crece linealmente con la
-   cantidad de bits modificados (4 LSBs implican cambios de hasta ±15
-   por píxel, visibles en zonas planas).
-2. El embedding/extracción se complica: hay que parametrizar la
-   cantidad de bits según `k`, manejar casos no divisores limpios
-   (¿qué pasa con `k=3` ó `k=5`?), y la deducción de tamaño en
-   recovery se vuelve menos directa.
-
-Una propuesta intermedia que también consideramos pero no
-implementamos: usar 1 LSB por píxel con portadoras del **mismo tamaño**
-que el secreto, lo que limitaría el esquema a `k ≥ 8`. Es la más
-simple, pero deja inutilizable la mitad del rango `k ∈ [2, 10]`.
-
-### Limitación actual
-
-`recovery()` está implementada solo para `k = 8`. La extensión a otros
-`k` requiere también fijar cómo se deducen las dimensiones
-`(width, height)` del secreto desde las de la portadora (en `k = 8`
-son iguales; para `k ≠ 8` solo sabemos el total de píxeles, no cómo
-distribuirlos). El criterio razonable sería guardar las dimensiones
-del secreto en algún campo del header durante distribución, pero el
-spec no lo pide explícitamente.
+Consideramos la alternativa de **mantener 1 LSB por píxel y agrandar las
+portadoras** (`carrier_pixels ≥ 8 · secret_pixels / k`, p. ej. 4× el
+secreto para `k = 2`). La descartamos porque obliga a portadoras mucho
+más grandes que el secreto para `k` chico y, al no coincidir los
+tamaños, requiere guardar las dimensiones del secreto como metadata
+embebida para poder reconstruir el header en la recuperación. La opción
+de 4 LSBs evita ambos problemas.
 
 ---
 
@@ -272,8 +268,9 @@ El algoritmo es directamente extensible:
 
 Para LSB replacement: con 24 bpp tenemos 3 bits utilizables por píxel
 (1 LSB por canal) en vez de 1, lo que **triplica la capacidad** de
-embedding. Eso a su vez permite portadoras más chicas o trabajar con
-`k < 8` sin necesidad de portadoras gigantes.
+embedding. Eso permitiría, por ejemplo, bajar la profundidad de LSB
+necesaria para `k` chico (menos deterioro visual) o usar portadoras aún
+más chicas.
 
 ---
 
@@ -320,9 +317,12 @@ embedding. Eso a su vez permite portadoras más chicas o trabajar con
 
 ## 7. Extensiones y modificaciones que haríamos
 
-1. **Soporte completo de `k ≠ 8` en recuperación**, definiendo cómo se
-   recuperan las dimensiones del secreto (probablemente guardándolas en
-   bytes adicionales del header durante distribución).
+1. **Portadoras de tamaño arbitrario** (no necesariamente igual al
+   secreto): exigir solo que tengan capacidad suficiente y guardar las
+   dimensiones del secreto como metadata embebida, para no atar el
+   tamaño de las portadoras al del secreto. También manejar secretos
+   cuyo total de píxeles no sea divisible por `k` (padding del último
+   bloque).
 2. **Soporte de imágenes en color (24 bpp)** aplicando el esquema por
    canal (opción 1 de la sección 5b).
 3. **Cifrado y/o derivación de la semilla** a partir de una passphrase

@@ -6,6 +6,16 @@
 #include "lsb/lsb.h"
 #include "../utils/utils.h"
 
+/* Embedding depth per scheme. The carriers always have the secret's
+ * dimensions; only the number of LSBs used changes, so the shadow body
+ * occupies px_per_byte(k) * (m/k) of the carrier's m pixels:
+ *   k == 8 → 1 LSB/pixel (8 px/byte) → fills the whole carrier (spec).
+ *   k != 8 → 4 LSB/pixel (2 px/byte) → uses 2/k of the carrier (<= m).
+ * Because the carrier and the secret are the same size, recovery reads
+ * the secret dimensions straight from the carrier header — no extra
+ * metadata is needed. */
+static size_t px_per_byte(int k) { return k == 8 ? 8 : 2; }
+
 /* ═══════════════════════════════════════════════════════════════ */
 
 int distribute(const char *secret_path, int k, int n, const char *dir) {
@@ -30,8 +40,8 @@ int distribute(const char *secret_path, int k, int n, const char *dir) {
                 secret_size, k);
         goto cleanup;
     }
-    size_t shadow_bytes  = secret_size / (size_t)k;
-    size_t pixels_needed = 8 * shadow_bytes;   /* 1 LSB per carrier pixel */
+    size_t shadow_bytes = secret_size / (size_t)k;
+    int    use_lsb4     = (k != 8);   /* 4 LSBs for k != 8, else 1 LSB */
 
     /* ── 2. List carriers from `dir` (excluding the secret) ──── */
     const char *secret_basename = strrchr(secret_path, '/');
@@ -61,29 +71,18 @@ int distribute(const char *secret_path, int k, int n, const char *dir) {
         }
         carriers_read++;
 
-        /* For k == 8 the spec requires exact width and height match
-         * with the secret. For other k the carrier just needs enough
-         * pixels to host the shadow (1 LSB per pixel). */
-        if (k == 8) {
-            if (carriers[i].width  != secret.width ||
-                carriers[i].height != secret.height) {
-                fprintf(stderr,
-                        "Error: with k=8, carrier '%s' must be %ux%u "
-                        "(matches secret) but is %ux%u.\n",
-                        carrier_paths[i],
-                        secret.width, secret.height,
-                        carriers[i].width, carriers[i].height);
-                goto cleanup;
-            }
-        } else {
-            size_t carrier_size = (size_t)carriers[i].width * carriers[i].height;
-            if (carrier_size < pixels_needed) {
-                fprintf(stderr,
-                        "Error: carrier '%s' has %zu pixels but %zu are needed "
-                        "to embed the shadow.\n",
-                        carrier_paths[i], carrier_size, pixels_needed);
-                goto cleanup;
-            }
+        /* Carriers must match the secret's dimensions for every k. The
+         * shadow always fits: it needs px_per_byte(k) * (m/k) pixels,
+         * i.e. m for k == 8 and 2m/k <= m for k != 8. */
+        if (carriers[i].width  != secret.width ||
+            carriers[i].height != secret.height) {
+            fprintf(stderr,
+                    "Error: carrier '%s' must be %ux%u (same as the secret) "
+                    "but is %ux%u.\n",
+                    carrier_paths[i],
+                    secret.width, secret.height,
+                    carriers[i].width, carriers[i].height);
+            goto cleanup;
         }
     }
 
@@ -136,7 +135,11 @@ int distribute(const char *secret_path, int k, int n, const char *dir) {
         }
 
         for (int j = 0; j < n; j++) {
-            lsb_embed_byte(carriers[j].pixels, block * 8, shadow_byte[j]);
+            size_t off = block * px_per_byte(k);
+            if (use_lsb4)
+                lsb4_embed_byte(carriers[j].pixels, off, shadow_byte[j]);
+            else
+                lsb_embed_byte(carriers[j].pixels, off, shadow_byte[j]);
         }
     }
 
@@ -171,15 +174,10 @@ cleanup:
 }
 
 int recovery(const char *secret_path, int k, const char *dir) {
-    /* The spec only fixes the carrier sizing for k=8. For other k the
-     * group must define a convention; here we only support k=8 to keep
-     * the recovery side aligned with the explicit part of the spec. */
-    if (k != 8) {
-        fprintf(stderr,
-                "Error: recovery is currently only supported for k=8 "
-                "(the case fixed by the spec).\n");
-        return 1;
-    }
+    /* k == 8 → 1-LSB embedding; any other k → 4-LSB. The carriers always
+     * share the secret's dimensions, so the recovered secret inherits
+     * them and no extra metadata is needed. */
+    int use_lsb4 = (k != 8);
 
     int       ret           = 1;
     BMPImage *carriers      = NULL;
@@ -218,12 +216,16 @@ int recovery(const char *secret_path, int k, const char *dir) {
         carriers_read++;
     }
 
-    /* ── 3. Validate same dimensions (spec requirement for k=8) ── */
+    /* ── 3. Validate carriers share dimensions; the secret has them ──
+     *
+     * For every k the secret and the carriers are the same size, so all
+     * participating carriers must agree on width and height and the
+     * recovered secret inherits those dimensions. */
     for (int i = 1; i < k; i++) {
         if (carriers[i].width  != carriers[0].width ||
             carriers[i].height != carriers[0].height) {
             fprintf(stderr,
-                    "Error: with k=8, all carriers must share dimensions. "
+                    "Error: all carriers must share dimensions. "
                     "'%s' is %ux%u but '%s' is %ux%u.\n",
                     carrier_paths[0], carriers[0].width, carriers[0].height,
                     carrier_paths[i], carriers[i].width, carriers[i].height);
@@ -271,7 +273,10 @@ int recovery(const char *secret_path, int k, const char *dir) {
     for (size_t block = 0; block < shadow_bytes; block++) {
         uint8_t y[GF_K_MAX];
         for (int i = 0; i < k; i++) {
-            y[i] = lsb_extract_byte(carriers[i].pixels, block * 8);
+            size_t off = block * px_per_byte(k);
+            y[i] = use_lsb4
+                 ? lsb4_extract_byte(carriers[i].pixels, off)
+                 : lsb_extract_byte(carriers[i].pixels, off);
         }
 
         int mat[GF_K_MAX][GF_K_MAX + 1];
@@ -301,7 +306,10 @@ int recovery(const char *secret_path, int k, const char *dir) {
         secret_bytes[i] ^= nextChar();
     }
 
-    /* ── 7. Build output BMP using carrier[0]'s header + palette ── */
+    /* ── 7. Build output BMP from carrier[0]'s header + palette ──
+     *
+     * The carrier already has the secret's dimensions (true for every k),
+     * so the header and palette are copied verbatim. */
     output.file_header = carriers[0].file_header;
     output.info_header = carriers[0].info_header;
     output.file_header.bfReserved1 = 0;   /* the secret is not a shadow */
