@@ -134,7 +134,6 @@ int main(int argc, char *argv[]) {
 
     /* ── On distribute, secret file must exist ──────────────── */
     if (mode == 'd') {
-        printf("secret: '%s'.\n", secret);
         FILE *f = fopen(secret, "rb");
         if (!f) {
             fprintf(stderr, "Error: secret image '%s' not found or cannot be opened.\n", secret);
