@@ -38,18 +38,27 @@ typedef struct {
 /**
  * In-memory representation of an 8-bit BMP image.
  *
- * The pixel buffer is stored *unpadded*: each row contains exactly
- * `width` bytes and `pixels[y*width + x]` is the byte at row `y`,
- * column `x`. Rows follow the same order they had in the file, which
- * for a standard BMP (biHeight > 0) means the first row in `pixels`
- * is the bottom row of the image.
+ * The pixel buffer is stored *exactly as on disk*, i.e. with the per-row
+ * 4-byte alignment padding included: `pixels` holds `row_size * height`
+ * bytes and row `y` occupies `pixels[y*row_size .. y*row_size + width)`,
+ * followed by `row_size - width` padding bytes. Rows keep their file
+ * order, which for a standard BMP (biHeight > 0) means the first row in
+ * `pixels` is the bottom row of the image.
+ *
+ * Keeping the padding in the buffer matters for the steganography: the
+ * cátedra's reference embeds the shadow stream over the whole pixel-data
+ * region (padding bytes included), so distribution and recovery must walk
+ * the same padded byte layout. For widths that are a multiple of 4 there
+ * is no padding and `row_size == width`.
  */
 typedef struct {
     BMPFileHeader file_header;
     BMPInfoHeader info_header;
     uint8_t *palette;        /* raw palette bytes, or NULL if absent */
     size_t   palette_size;   /* size of `palette` in bytes (typically 1024 for 8-bit) */
-    uint8_t *pixels;         /* width * height bytes, unpadded */
+    uint8_t *pixels;         /* row_size * height bytes, padding included */
+    size_t   row_size;       /* bytes per row on disk (width rounded up to a multiple of 4) */
+    size_t   pixel_bytes;    /* total bytes in `pixels` (row_size * height) */
     uint32_t width;          /* convenience: |biWidth| */
     uint32_t height;         /* convenience: |biHeight| */
 } BMPImage;
@@ -58,9 +67,9 @@ typedef struct {
  * Load an 8-bit uncompressed BMP image from disk.
  *
  * Validates the magic number, bit depth (must be 8) and compression
- * (must be 0). Reads the palette if present, then reads the pixel
- * data row by row, stripping the per-row padding so `img->pixels`
- * holds exactly width*height bytes.
+ * (must be 0). Reads the palette if present, then reads the whole pixel
+ * data region verbatim (per-row padding included) so `img->pixels`
+ * holds `row_size * height` bytes.
  *
  * @param path  Path to the BMP file. Must not be NULL.
  * @param img   Output struct. On success its `palette` and `pixels`
@@ -77,14 +86,14 @@ int bmp_read(const char *path, BMPImage *img);
 /**
  * Write a BMPImage back to disk as a well-formed BMP file.
  *
- * Re-applies per-row padding as required by the format. The headers
- * and palette are written verbatim from the struct, so any in-place
- * modifications (e.g. setting bfReserved1 to the PRNG seed) are
- * preserved.
+ * The pixel buffer already carries the per-row padding, so it is dumped
+ * verbatim. The headers and palette are written verbatim from the
+ * struct, so any in-place modifications (e.g. setting bfReserved1 to the
+ * PRNG seed) are preserved.
  *
  * @param path  Output path. Existing files are overwritten.
  * @param img   Image to write. Must have a valid `pixels` buffer of
- *              size width*height. `palette` may be NULL only when the
+ *              size `pixel_bytes`. `palette` may be NULL only when the
  *              source image had no palette.
  *
  * @return 0 on success, non-zero on failure.

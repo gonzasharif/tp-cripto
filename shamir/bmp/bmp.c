@@ -44,17 +44,15 @@ int bmp_read(const char *path, BMPImage *img) {
      * bfOffBits — some BMP encoders leave a gap. */
     if (fseek(f, (long)img->file_header.bfOffBits, SEEK_SET) != 0) goto fail;
 
-    size_t pixel_count = (size_t)img->width * img->height;
-    img->pixels = malloc(pixel_count);
+    /* Read the pixel-data region verbatim, padding included. The
+     * steganographic stream is embedded over these exact bytes (the
+     * cátedra's reference walks the padding too), so we must not strip
+     * it here. */
+    img->row_size    = row_stride(img->width, img->info_header.biBitCount);
+    img->pixel_bytes = img->row_size * img->height;
+    img->pixels = malloc(img->pixel_bytes);
     if (!img->pixels) goto fail;
-
-    size_t stride  = row_stride(img->width, img->info_header.biBitCount);
-    size_t padding = stride - img->width;
-    for (uint32_t y = 0; y < img->height; y++) {
-        if (fread(img->pixels + (size_t)y * img->width, 1, img->width, f) != img->width)
-            goto fail;
-        if (padding && fseek(f, (long)padding, SEEK_CUR) != 0) goto fail;
-    }
+    if (fread(img->pixels, 1, img->pixel_bytes, f) != img->pixel_bytes) goto fail;
 
     fclose(f);
     return 0;
@@ -76,14 +74,9 @@ int bmp_write(const char *path, const BMPImage *img) {
         if (fwrite(img->palette, 1, img->palette_size, f) != img->palette_size) goto fail;
     }
 
-    size_t stride  = row_stride(img->width, img->info_header.biBitCount);
-    size_t padding = stride - img->width;
-    static const uint8_t zero_pad[4] = {0, 0, 0, 0};
-    for (uint32_t y = 0; y < img->height; y++) {
-        if (fwrite(img->pixels + (size_t)y * img->width, 1, img->width, f) != img->width)
-            goto fail;
-        if (padding && fwrite(zero_pad, 1, padding, f) != padding) goto fail;
-    }
+    /* The pixel buffer already includes the per-row padding, so dump it
+     * verbatim. */
+    if (fwrite(img->pixels, 1, img->pixel_bytes, f) != img->pixel_bytes) goto fail;
 
     fclose(f);
     return 0;

@@ -33,7 +33,10 @@ int distribute(const char *secret_path, int k, int n, const char *dir) {
         return 1;
     }
 
-    size_t secret_size = (size_t)secret.width * secret.height;
+    /* Work over the raw pixel-data region (per-row padding included), which
+     * is what the steganographic stream covers. For widths that are a
+     * multiple of 4 this equals width*height. */
+    size_t secret_size = secret.pixel_bytes;
     if (secret_size % (size_t)k != 0) {
         fprintf(stderr,
                 "Error: secret size (%zu px) must be divisible by k=%d.\n",
@@ -233,7 +236,9 @@ int recovery(const char *secret_path, int k, const char *dir) {
         }
     }
 
-    size_t secret_size  = (size_t)carriers[0].width * carriers[0].height;
+    /* Same convention as distribute: operate over the padded pixel-data
+     * region the shadow stream was embedded into. */
+    size_t secret_size  = carriers[0].pixel_bytes;
     size_t shadow_bytes = secret_size / (size_t)k;
 
     /* ── 4. Read seed (header bytes 6-7) and shadow indices (8-9) ── */
@@ -314,8 +319,10 @@ int recovery(const char *secret_path, int k, const char *dir) {
     output.info_header = carriers[0].info_header;
     output.file_header.bfReserved1 = 0;   /* the secret is not a shadow */
     output.file_header.bfReserved2 = 0;
-    output.width  = carriers[0].width;
-    output.height = carriers[0].height;
+    output.width       = carriers[0].width;
+    output.height      = carriers[0].height;
+    output.row_size    = carriers[0].row_size;
+    output.pixel_bytes = carriers[0].pixel_bytes;
 
     if (carriers[0].palette && carriers[0].palette_size > 0) {
         output.palette_size = carriers[0].palette_size;
