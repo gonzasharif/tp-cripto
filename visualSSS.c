@@ -35,7 +35,7 @@ static void exit_failure(char **argv, const char *fmt, ...) {
     vfprintf(stderr, fmt, args);
     va_end(args);
     print_usage(argv[0]);
-    exit(EXIT_FAILURE);
+    exit(SSS_USAGE);
 }
 
 /* ═══════════════════════════════════════════════════════════════ */
@@ -137,7 +137,7 @@ int main(int argc, char *argv[]) {
         FILE *f = fopen(secret, "rb");
         if (!f) {
             fprintf(stderr, "Error: secret image '%s' not found or cannot be opened.\n", secret);
-            return EXIT_FAILURE;
+            return SSS_IO;
         }
         fclose(f);
     }
@@ -150,7 +150,7 @@ int main(int argc, char *argv[]) {
     /* ── Validate directory ─────────────────────────────────── */
     if (!directory_exists(dir)) {
         fprintf(stderr, "Error: directory '%s' does not exist or cannot be opened.\n", dir);
-        return EXIT_FAILURE;
+        return SSS_IO;
     }
 
  /* ── Resolve n if not provided (only relevant for -d) ────── */
@@ -165,7 +165,7 @@ int main(int argc, char *argv[]) {
         int found = count_bmp_files(dir, secret_basename, 1);
         if (found < 0) {
             fprintf(stderr, "Error: could not scan directory '%s'.\n", dir);
-            return EXIT_FAILURE;
+            return SSS_IO;
         }
        n = found;
         printf("Info: Found %d BMP carrier image(s).\n", n);
@@ -179,11 +179,11 @@ int main(int argc, char *argv[]) {
                 "Error: n must be at least %d (got %d).\n"
                 "       Make sure there are enough BMP images in '%s'.\n",
                 N_MIN, n, dir);
-            return EXIT_FAILURE;
+            return SSS_DATA;
         }
         if (n < k) {
             fprintf(stderr, "Error: n (%d) must be >= k (%d).\n", n, k);
-            return EXIT_FAILURE;
+            return SSS_DATA;
         }
     }
 
@@ -199,10 +199,10 @@ int main(int argc, char *argv[]) {
 
     int rc = (mode == 'd') ? distribute(secret, k, n, dir)
                            : recovery(secret, k, dir);
-    if (rc != 0) {
-        return EXIT_FAILURE;
+    if (rc != SSS_OK) {
+        return rc;   /* propagate the specific error category */
     }
 
     printf("Done :)\n");
-    return EXIT_SUCCESS;
+    return SSS_OK;
 }

@@ -49,6 +49,21 @@ visualSSS -d -secret clave.bmp -k 3
 visualSSS -r -secret secreta.bmp -k 8 -dir varias
 ```
 
+### Códigos de salida
+
+El programa devuelve un código de salida según la categoría del error, para
+poder distinguirlos desde un script:
+
+| Código | Categoría | Ejemplos |
+|---|---|---|
+| `0` | Éxito | — |
+| `1` | Argumentos | falta un parámetro, flag desconocido, `k` fuera de `[2, 10]`, `-n` usado con `-r`. |
+| `2` | E/S | el directorio no existe, o un BMP no se puede abrir / leer / escribir. |
+| `3` | Datos | menos de `k` portadoras, `n < k`, tamaño del secreto no divisible por `k`, portadoras de distinto tamaño, o índice de sombra inválido. |
+
+En todos los casos de error se imprime además un mensaje descriptivo a
+`stderr` (y la sintaxis de uso, para los errores de argumentos).
+
 ## Estructura del proyecto
 
 ```

@@ -6,6 +6,8 @@
 #include "lsb/lsb.h"
 #include "../utils/utils.h"
 
+/* ─────────────────────────── Helpers ─────────────────────────── */
+
 /* Embedding depth per scheme. The carriers always have the secret's
  * dimensions; only the number of LSBs used changes, so the shadow body
  * occupies px_per_byte(k) * (m/k) of the carrier's m pixels:
@@ -16,10 +18,149 @@
  * metadata is needed. */
 static size_t px_per_byte(int k) { return k == 8 ? 8 : 2; }
 
+/* Embed the shadow byte of block `block` into a carrier, picking the LSB
+ * depth from the scheme. */
+static void embed_shadow_byte(uint8_t *pixels, size_t block, int k, uint8_t byte) {
+    size_t off = block * px_per_byte(k);
+    if (k == 8) lsb_embed_byte(pixels, off, byte);
+    else        lsb4_embed_byte(pixels, off, byte);
+}
+
+/* Inverse of embed_shadow_byte: read the shadow byte of block `block`. */
+static uint8_t extract_shadow_byte(const uint8_t *pixels, size_t block, int k) {
+    size_t off = block * px_per_byte(k);
+    return k == 8 ? lsb_extract_byte(pixels, off)
+                  : lsb4_extract_byte(pixels, off);
+}
+
+/* Apply the reversible PRNG XOR mask (Wu-Lo Step 1): dst[i] = src[i] ^
+ * nextChar(), seeding the LCG with `seed`. `dst` and `src` may alias, so
+ * the same routine both randomizes the secret and undoes the mask on
+ * recovery. */
+static void apply_xor_mask(uint8_t *dst, const uint8_t *src,
+                           size_t size, uint16_t seed) {
+    setSeed((int64_t)seed);
+    for (size_t i = 0; i < size; i++)
+        dst[i] = (uint8_t)(src[i] ^ nextChar());
+}
+
+/* Compute the n shadow bytes of one block. The k bytes in `coefs` are the
+ * coefficients of a degree-(k-1) polynomial mod 257; out[j] = p(j+1).
+ *
+ * Handles the GF_MOD == 257 overflow (Wu-Lo Step 5): if any evaluation
+ * lands on 256 (does not fit in a byte) the first non-zero coefficient is
+ * decremented and every shadow re-evaluated. The paper proves an all-zero
+ * block can never yield 256, so a non-zero coefficient always exists, and
+ * each step lowers the coefficient sum by one, so the loop terminates.
+ * `coefs` may be modified in place. */
+static void shares_for_block(uint8_t *coefs, int k, int n, uint8_t *out) {
+    for (;;) {
+        int collision = 0;
+        for (int j = 0; j < n; j++) {
+            int result = gf_poly_eval(coefs, k, j + 1);
+            if (result == 256) { collision = 1; break; }
+            out[j] = (uint8_t)result;
+        }
+        if (!collision) return;
+
+        int idx = 0;
+        while (idx < k && coefs[idx] == 0) idx++;
+        coefs[idx]--;   /* idx < k guaranteed: an all-zero block can't hit 256 */
+    }
+}
+
+/* Recover the k coefficients of one block (its k permuted secret bytes)
+ * from the k shares y[i] at abscissas x_values[i], by solving the
+ * Vandermonde system V·c = y mod 257 with Gauss-Jordan. Writes the k
+ * bytes to `out`; returns 0 on success, non-zero if the matrix is
+ * singular (duplicate x-values). */
+static int solve_block(const int *x_values, const uint8_t *y, int k, uint8_t *out) {
+    int mat[GF_K_MAX][GF_K_MAX + 1];
+    for (int i = 0; i < k; i++) {
+        int power = 1;
+        for (int j = 0; j < k; j++) {
+            mat[i][j] = power;
+            power = (int)((long)power * x_values[i] % GF_MOD);
+        }
+        mat[i][k] = (int)y[i];
+    }
+
+    int coefs[GF_K_MAX];
+    if (gf_gauss_solve(mat, k, coefs) != 0) return 1;
+    for (int i = 0; i < k; i++) out[i] = (uint8_t)coefs[i];
+    return 0;
+}
+
+/* List the BMP carriers in `dir` (excluding `exclude`), require at least
+ * `n_read` of them, and read the first `n_read` into a fresh array.
+ *
+ * On return `paths` and `n_paths` hold the full listing (caller frees
+ * both the strings and the array) and `carriers` holds the array whose
+ * first `n_loaded` entries are initialized (caller frees with bmp_free).
+ * The out-params are always set so the caller's cleanup is valid even on
+ * failure. Prints its own diagnostics; returns 0 on success. */
+static int load_carriers(const char *dir, const char *exclude, int n_read,
+                         char ***paths, int *n_paths,
+                         BMPImage **carriers, int *n_loaded) {
+    *paths = NULL; *n_paths = 0; *carriers = NULL; *n_loaded = 0;
+
+    char **list = NULL;
+    int count = list_bmp_files(dir, exclude, &list);
+    if (count < 0) {
+        fprintf(stderr, "Error: could not list BMPs in '%s'.\n", dir);
+        return SSS_IO;
+    }
+    *paths = list;
+    *n_paths = count;
+
+    if (count < n_read) {
+        fprintf(stderr,
+                "Error: need at least %d carrier images but found %d in '%s'.\n",
+                n_read, count, dir);
+        return SSS_DATA;
+    }
+
+    *carriers = calloc((size_t)n_read, sizeof(BMPImage));
+    if (!*carriers) return SSS_DATA;
+
+    for (int i = 0; i < n_read; i++) {
+        if (bmp_read(list[i], &(*carriers)[i]) != 0) {
+            fprintf(stderr, "Error: could not read carrier '%s'.\n", list[i]);
+            return SSS_IO;
+        }
+        (*n_loaded)++;
+    }
+    return SSS_OK;
+}
+
+/* Read the k shadow indices (header bytes 8-9) used as polynomial
+ * abscissas, rejecting non-positive or duplicate values — both would make
+ * the Vandermonde system ill-defined. Returns 0 on success. */
+static int read_x_values(const BMPImage *carriers, char *const *paths,
+                         int k, int *x_values) {
+    for (int i = 0; i < k; i++) {
+        x_values[i] = (int)carriers[i].file_header.bfReserved2;
+        if (x_values[i] < 1) {
+            fprintf(stderr, "Error: invalid shadow index %d in carrier '%s'.\n",
+                    x_values[i], paths[i]);
+            return 1;
+        }
+    }
+    for (int i = 0; i < k; i++)
+        for (int j = i + 1; j < k; j++)
+            if (x_values[i] == x_values[j]) {
+                fprintf(stderr,
+                        "Error: duplicate shadow index %d in '%s' and '%s'.\n",
+                        x_values[i], paths[i], paths[j]);
+                return 1;
+            }
+    return 0;
+}
+
 /* ═══════════════════════════════════════════════════════════════ */
 
 int distribute(const char *secret_path, int k, int n, const char *dir) {
-    int       ret           = 1;     /* failure by default */
+    int       ret           = SSS_DATA;   /* overwritten at each exit */
     BMPImage  secret        = {0};
     BMPImage *carriers      = NULL;
     char    **carrier_paths = NULL;
@@ -27,10 +168,10 @@ int distribute(const char *secret_path, int k, int n, const char *dir) {
     int       carriers_read = 0;
     uint8_t  *perm          = NULL;
 
-    /* ── 1. Read secret ───────────────────────────────────────── */
+    /* ── 1. Read the secret ───────────────────────────────────── */
     if (bmp_read(secret_path, &secret) != 0) {
         fprintf(stderr, "Error: could not read secret '%s'.\n", secret_path);
-        return 1;
+        return SSS_IO;
     }
 
     /* Work over the raw pixel-data region (per-row padding included), which
@@ -39,114 +180,52 @@ int distribute(const char *secret_path, int k, int n, const char *dir) {
     size_t secret_size = secret.pixel_bytes;
     if (secret_size % (size_t)k != 0) {
         fprintf(stderr,
-                "Error: secret size (%zu px) must be divisible by k=%d.\n",
+                "Error: secret size (%zu bytes) must be divisible by k=%d.\n",
                 secret_size, k);
+        ret = SSS_DATA;
         goto cleanup;
     }
     size_t shadow_bytes = secret_size / (size_t)k;
-    int    use_lsb4     = (k != 8);   /* 4 LSBs for k != 8, else 1 LSB */
 
-    /* ── 2. List carriers from `dir` (excluding the secret) ──── */
+    /* ── 2. Load the first n carriers and check they match the secret ── */
     const char *secret_basename = strrchr(secret_path, '/');
     secret_basename = secret_basename ? secret_basename + 1 : secret_path;
 
-    carrier_count = list_bmp_files(dir, secret_basename, &carrier_paths);
-    if (carrier_count < 0) {
-        fprintf(stderr, "Error: could not list BMPs in '%s'.\n", dir);
-        goto cleanup;
-    }
-    if (carrier_count < n) {
-        fprintf(stderr,
-                "Error: need %d carrier images but found %d in '%s'.\n",
-                n, carrier_count, dir);
-        goto cleanup;
-    }
-
-    /* ── 3. Read first n carriers and validate they are big enough ── */
-    carriers = calloc((size_t)n, sizeof(BMPImage));
-    if (!carriers) goto cleanup;
+    int load_rc = load_carriers(dir, secret_basename, n,
+                                &carrier_paths, &carrier_count,
+                                &carriers, &carriers_read);
+    if (load_rc != SSS_OK) { ret = load_rc; goto cleanup; }
 
     for (int i = 0; i < n; i++) {
-        if (bmp_read(carrier_paths[i], &carriers[i]) != 0) {
-            fprintf(stderr, "Error: could not read carrier '%s'.\n",
-                    carrier_paths[i]);
-            goto cleanup;
-        }
-        carriers_read++;
-
-        /* Carriers must match the secret's dimensions for every k. The
-         * shadow always fits: it needs px_per_byte(k) * (m/k) pixels,
-         * i.e. m for k == 8 and 2m/k <= m for k != 8. */
         if (carriers[i].width  != secret.width ||
             carriers[i].height != secret.height) {
             fprintf(stderr,
                     "Error: carrier '%s' must be %ux%u (same as the secret) "
                     "but is %ux%u.\n",
-                    carrier_paths[i],
-                    secret.width, secret.height,
+                    carrier_paths[i], secret.width, secret.height,
                     carriers[i].width, carriers[i].height);
+            ret = SSS_DATA;
             goto cleanup;
         }
     }
 
-    /* ── 4. Generate seed and permute the secret with PRNG XOR mask.
-     *
-     * Following the Thien-Lin scheme, we XOR each secret byte with a
-     * pseudo-random byte from the LCG. The mask is reversible by
-     * XORing again with the same stream, so recovery only needs the
-     * seed (stored in the carrier header below). */
+    /* ── 3. Randomize the secret with the PRNG XOR mask (Step 1) ── */
     uint16_t seed = (uint16_t)(time(NULL) & 0xFFFF);
-    setSeed((int64_t)seed);
-
     perm = malloc(secret_size);
-    if (!perm) goto cleanup;
-    for (size_t i = 0; i < secret_size; i++) {
-        perm[i] = secret.pixels[i] ^ nextChar();
-    }
+    if (!perm) { ret = SSS_DATA; goto cleanup; }
+    apply_xor_mask(perm, secret.pixels, secret_size, seed);
 
-    /* ── 5. Evaluate polynomials and embed shadow bytes ─────────
-     *
-     * The permuted secret is consumed in blocks of k bytes. Each block
-     * forms a polynomial of degree k-1 (the k bytes are the
-     * coefficients). For shadow j ∈ {1..n} we evaluate p(j) mod 257
-     * and embed the resulting byte in 8 consecutive LSBs of carrier
-     * j-1.
-     *
-     * Because GF_MOD = 257 an evaluation can produce 256, which does not
-     * fit in a byte. We follow Wu-Lo Step 5 verbatim: whenever any
-     * shadow lands on 256, decrement the first non-zero coefficient of
-     * the block by one and re-evaluate every shadow. The paper proves an
-     * all-zero block can never yield 256 (it evaluates to 0), so a
-     * non-zero coefficient always exists; each step lowers the
-     * coefficient sum by one, so the loop terminates. */
+    /* ── 4. Share each block of k bytes and embed the n results ── */
     for (size_t block = 0; block < shadow_bytes; block++) {
         uint8_t *coefs = perm + block * (size_t)k;
         uint8_t  shadow_byte[GF_K_MAX];
 
-        for (;;) {
-            int collision = 0;
-            for (int j = 0; j < n; j++) {
-                int result = gf_poly_eval(coefs, k, j + 1);
-                if (result == 256) { collision = 1; break; }
-                shadow_byte[j] = (uint8_t)result;
-            }
-            if (!collision) break;
-
-            int idx = 0;
-            while (idx < k && coefs[idx] == 0) idx++;
-            coefs[idx]--;   /* idx < k guaranteed: all-zero can't hit 256 */
-        }
-
-        for (int j = 0; j < n; j++) {
-            size_t off = block * px_per_byte(k);
-            if (use_lsb4)
-                lsb4_embed_byte(carriers[j].pixels, off, shadow_byte[j]);
-            else
-                lsb_embed_byte(carriers[j].pixels, off, shadow_byte[j]);
-        }
+        shares_for_block(coefs, k, n, shadow_byte);
+        for (int j = 0; j < n; j++)
+            embed_shadow_byte(carriers[j].pixels, block, k, shadow_byte[j]);
     }
 
-    /* ── 6. Stamp header (seed + shadow index) and write carriers ── */
+    /* ── 5. Stamp seed + shadow index into the header and write ── */
     for (int j = 0; j < n; j++) {
         carriers[j].file_header.bfReserved1 = seed;
         carriers[j].file_header.bfReserved2 = (uint16_t)(j + 1);
@@ -154,13 +233,14 @@ int distribute(const char *secret_path, int k, int n, const char *dir) {
         if (bmp_write(carrier_paths[j], &carriers[j]) != 0) {
             fprintf(stderr, "Error: could not write carrier '%s'.\n",
                     carrier_paths[j]);
+            ret = SSS_IO;
             goto cleanup;
         }
     }
 
     printf("Info: distributed secret into %d shadow(s) with seed %u.\n",
            n, (unsigned)seed);
-    ret = 0;
+    ret = SSS_OK;
 
 cleanup:
     if (carriers) {
@@ -177,12 +257,7 @@ cleanup:
 }
 
 int recovery(const char *secret_path, int k, const char *dir) {
-    /* k == 8 → 1-LSB embedding; any other k → 4-LSB. The carriers always
-     * share the secret's dimensions, so the recovered secret inherits
-     * them and no extra metadata is needed. */
-    int use_lsb4 = (k != 8);
-
-    int       ret           = 1;
+    int       ret           = SSS_DATA;   /* overwritten at each exit */
     BMPImage *carriers      = NULL;
     char    **carrier_paths = NULL;
     int       carrier_count = 0;
@@ -190,40 +265,19 @@ int recovery(const char *secret_path, int k, const char *dir) {
     uint8_t  *secret_bytes  = NULL;
     BMPImage  output        = {0};
 
-    /* ── 1. List BMPs in `dir` (excluding the target secret path) ── */
+    /* ── 1. Load the first k carriers ─────────────────────────── */
     const char *secret_basename = strrchr(secret_path, '/');
     secret_basename = secret_basename ? secret_basename + 1 : secret_path;
 
-    carrier_count = list_bmp_files(dir, secret_basename, &carrier_paths);
-    if (carrier_count < 0) {
-        fprintf(stderr, "Error: could not list BMPs in '%s'.\n", dir);
-        goto cleanup;
-    }
-    if (carrier_count < k) {
-        fprintf(stderr,
-                "Error: need at least %d carrier images but found %d in '%s'.\n",
-                k, carrier_count, dir);
-        goto cleanup;
-    }
+    int load_rc = load_carriers(dir, secret_basename, k,
+                                &carrier_paths, &carrier_count,
+                                &carriers, &carriers_read);
+    if (load_rc != SSS_OK) { ret = load_rc; goto cleanup; }
 
-    /* ── 2. Read first k carriers ─────────────────────────────── */
-    carriers = calloc((size_t)k, sizeof(BMPImage));
-    if (!carriers) goto cleanup;
-
-    for (int i = 0; i < k; i++) {
-        if (bmp_read(carrier_paths[i], &carriers[i]) != 0) {
-            fprintf(stderr, "Error: could not read carrier '%s'.\n",
-                    carrier_paths[i]);
-            goto cleanup;
-        }
-        carriers_read++;
-    }
-
-    /* ── 3. Validate carriers share dimensions; the secret has them ──
+    /* ── 2. All carriers must share dimensions; the secret inherits them.
      *
      * For every k the secret and the carriers are the same size, so all
-     * participating carriers must agree on width and height and the
-     * recovered secret inherits those dimensions. */
+     * participating carriers must agree on width and height. */
     for (int i = 1; i < k; i++) {
         if (carriers[i].width  != carriers[0].width ||
             carriers[i].height != carriers[0].height) {
@@ -232,6 +286,7 @@ int recovery(const char *secret_path, int k, const char *dir) {
                     "'%s' is %ux%u but '%s' is %ux%u.\n",
                     carrier_paths[0], carriers[0].width, carriers[0].height,
                     carrier_paths[i], carriers[i].width, carriers[i].height);
+            ret = SSS_DATA;
             goto cleanup;
         }
     }
@@ -241,77 +296,38 @@ int recovery(const char *secret_path, int k, const char *dir) {
     size_t secret_size  = carriers[0].pixel_bytes;
     size_t shadow_bytes = secret_size / (size_t)k;
 
-    /* ── 4. Read seed (header bytes 6-7) and shadow indices (8-9) ── */
+    /* ── 3. Read seed (bytes 6-7) and shadow indices / x-values (8-9) ── */
     uint16_t seed = carriers[0].file_header.bfReserved1;
-
     int x_values[GF_K_MAX];
-    for (int i = 0; i < k; i++) {
-        x_values[i] = (int)carriers[i].file_header.bfReserved2;
-        if (x_values[i] < 1) {
-            fprintf(stderr,
-                    "Error: invalid shadow index %d in carrier '%s'.\n",
-                    x_values[i], carrier_paths[i]);
-            goto cleanup;
-        }
-    }
-    /* Duplicate x-values would make the Vandermonde matrix singular. */
-    for (int i = 0; i < k; i++) {
-        for (int j = i + 1; j < k; j++) {
-            if (x_values[i] == x_values[j]) {
-                fprintf(stderr,
-                        "Error: duplicate shadow index %d in '%s' and '%s'.\n",
-                        x_values[i], carrier_paths[i], carrier_paths[j]);
-                goto cleanup;
-            }
-        }
+    if (read_x_values(carriers, carrier_paths, k, x_values) != 0) {
+        ret = SSS_DATA;
+        goto cleanup;
     }
 
-    /* ── 5. For each block, interpolate the polynomial mod 257.
+    /* ── 4. Interpolate each block to recover the permuted secret bytes.
      *
-     * For block b we have k pairs (x_i, p(x_i)) where p has degree
-     * k-1. Solving V * c = y (with V the Vandermonde matrix of the
-     * x-values) yields the k coefficients c[0..k-1], which are
-     * exactly the k permuted secret bytes of that block. */
+     * Block b gives k pairs (x_i, p(x_i)) of a degree-(k-1) polynomial;
+     * its coefficients are exactly the k permuted secret bytes. */
     secret_bytes = malloc(secret_size);
-    if (!secret_bytes) goto cleanup;
+    if (!secret_bytes) { ret = SSS_DATA; goto cleanup; }
 
     for (size_t block = 0; block < shadow_bytes; block++) {
         uint8_t y[GF_K_MAX];
-        for (int i = 0; i < k; i++) {
-            size_t off = block * px_per_byte(k);
-            y[i] = use_lsb4
-                 ? lsb4_extract_byte(carriers[i].pixels, off)
-                 : lsb_extract_byte(carriers[i].pixels, off);
-        }
+        for (int i = 0; i < k; i++)
+            y[i] = extract_shadow_byte(carriers[i].pixels, block, k);
 
-        int mat[GF_K_MAX][GF_K_MAX + 1];
-        for (int i = 0; i < k; i++) {
-            int power = 1;
-            for (int j = 0; j < k; j++) {
-                mat[i][j] = power;
-                power = (int)((long)power * x_values[i] % GF_MOD);
-            }
-            mat[i][k] = (int)y[i];
-        }
-
-        int coefs[GF_K_MAX];
-        if (gf_gauss_solve(mat, k, coefs) != 0) {
+        if (solve_block(x_values, y, k, secret_bytes + block * (size_t)k) != 0) {
             fprintf(stderr,
                     "Error: singular Vandermonde matrix at block %zu.\n", block);
+            ret = SSS_DATA;
             goto cleanup;
         }
-        for (int i = 0; i < k; i++) {
-            secret_bytes[block * (size_t)k + (size_t)i] = (uint8_t)coefs[i];
-        }
     }
 
-    /* ── 6. Undo the PRNG XOR mask using the recovered seed ──── */
-    setSeed((int64_t)seed);
-    for (size_t i = 0; i < secret_size; i++) {
-        secret_bytes[i] ^= nextChar();
-    }
+    /* ── 5. Undo the PRNG XOR mask with the recovered seed ────── */
+    apply_xor_mask(secret_bytes, secret_bytes, secret_size, seed);
 
-    /* ── 7. Build output BMP from carrier[0]'s header + palette ──
+    /* ── 6. Build the output BMP from carrier[0]'s header + palette ──
      *
      * The carrier already has the secret's dimensions (true for every k),
      * so the header and palette are copied verbatim. */
@@ -327,23 +343,24 @@ int recovery(const char *secret_path, int k, const char *dir) {
     if (carriers[0].palette && carriers[0].palette_size > 0) {
         output.palette_size = carriers[0].palette_size;
         output.palette = malloc(output.palette_size);
-        if (!output.palette) goto cleanup;
+        if (!output.palette) { ret = SSS_DATA; goto cleanup; }
         memcpy(output.palette, carriers[0].palette, output.palette_size);
     }
 
     output.pixels = malloc(secret_size);
-    if (!output.pixels) goto cleanup;
+    if (!output.pixels) { ret = SSS_DATA; goto cleanup; }
     memcpy(output.pixels, secret_bytes, secret_size);
 
     if (bmp_write(secret_path, &output) != 0) {
         fprintf(stderr, "Error: could not write recovered secret '%s'.\n",
                 secret_path);
+        ret = SSS_IO;
         goto cleanup;
     }
 
     printf("Info: recovered secret '%s' from %d shadow(s) with seed %u.\n",
            secret_path, k, (unsigned)seed);
-    ret = 0;
+    ret = SSS_OK;
 
 cleanup:
     if (carriers) {

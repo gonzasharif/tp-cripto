@@ -10,6 +10,25 @@
         abort(); \
     } while(0)
 
+/* Process exit / return codes by error category, shared by the CLI
+ * (main) and the distribute()/recovery() routines, so the exit status
+ * tells a script what kind of error occurred:
+ *   SSS_OK    success
+ *   SSS_USAGE invalid command-line arguments (missing, wrong type,
+ *             unknown flag, k out of range, -n misuse)
+ *   SSS_IO    a file or directory could not be opened / read / written
+ *   SSS_DATA  well-formed request that cannot be carried out: too few
+ *             carriers, n < k, secret size not divisible by k, carriers
+ *             with wrong/mismatched dimensions, invalid/duplicate shadow
+ *             index, a singular system, or an allocation failure
+ */
+enum sss_status {
+    SSS_OK    = 0,
+    SSS_USAGE = 1,
+    SSS_IO    = 2,
+    SSS_DATA  = 3
+};
+
 /**
  * Distribute a secret BMP image into `n` shadow images using a
  * (k, n)-threshold secret sharing scheme.
@@ -29,9 +48,10 @@
  * @param dir          Directory containing the carrier BMP images that
  *                     will hold the shadows. Must not be NULL.
  *
- * @return 0 on success, non-zero on failure (e.g. the secret cannot be
- *         opened, there are not enough carriers in `dir`, or a carrier
- *         cannot be written).
+ * @return SSS_OK on success, or an `sss_status` error code: SSS_IO if
+ *         the secret/carriers cannot be read or written, SSS_DATA if
+ *         there are too few carriers, the secret size is not divisible
+ *         by `k`, or a carrier does not match the secret's dimensions.
  */
 int distribute(const char * secret_path, int k, int n, const char * dir);
 
@@ -51,7 +71,9 @@ int distribute(const char * secret_path, int k, int n, const char * dir);
  * @param dir          Directory containing the carrier BMP images with
  *                     embedded shadows. Must not be NULL.
  *
- * @return 0 on success, non-zero on failure (e.g. fewer than `k`
- *         shadows could be read, or the output file cannot be written).
+ * @return SSS_OK on success, or an `sss_status` error code: SSS_IO if
+ *         the carriers or the output file cannot be read/written,
+ *         SSS_DATA if fewer than `k` carriers are available, they
+ *         disagree on dimensions, or carry invalid shadow indices.
  */
 int recovery(const char * secret_path, int k, const char * dir);
